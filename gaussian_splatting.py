@@ -47,29 +47,46 @@ class GaussianSplatting2D(nn.Module):
     def _init_gaussians(self):
         """Initialize Gaussian parameters as nn.Parameter."""
         num_channels = 1 if self.grayscale else 3
+        bd = 2
 
         if self.model_type == "2dgs":
-            # 2DGS: purely 2D representation
-            # Initialize in pixel space [0, width] x [0, height]
+            # 2DGS: 2D Gaussians embedded in 3D space (z=0)
+            # Initialize with grid + noise for uniform coverage (like aberration basis)
+            grid_size = int(math.sqrt(self.num_gaussians))
+            if grid_size * grid_size < self.num_gaussians:
+                grid_size += 1
+
+            # Create grid in [-bd, bd] to match camera view
+            x = torch.linspace(-bd, bd, grid_size)
+            y = torch.linspace(-bd, bd, grid_size)
+            grid_x, grid_y = torch.meshgrid(x, y, indexing='xy')
+            grid_xy = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=1)[:self.num_gaussians]
+
+            # Add small random noise for variation
+            noise = (torch.rand_like(grid_xy) - 0.5) * (2 * bd / grid_size) * 0.5
+            means_xy = grid_xy + noise
+            means_z = torch.zeros(self.num_gaussians, 1)
+
             self.means = nn.Parameter(
-                torch.rand(self.num_gaussians, 2) * self.width,
+                torch.cat([means_xy, means_z], dim=1),
                 requires_grad=True
             )
 
-            # 2D scales (width, height)
+            # 2D scales (width, height) + small z scale
+            scales_xy = torch.rand(self.num_gaussians, 2) * 0.5 + 0.1
+            scales_z = torch.ones(self.num_gaussians, 1) * 0.01
             self.scales = nn.Parameter(
-                torch.rand(self.num_gaussians, 2) * 10 + 1,  # scales 1-11 pixels
+                torch.cat([scales_xy, scales_z], dim=1),
                 requires_grad=True
             )
 
-            # Rotation angles (in radians)
+            # Rotation angles (in radians) for 2DGS
             self.quats = nn.Parameter(
                 torch.rand(self.num_gaussians) * 2 * math.pi,
                 requires_grad=True
             )
         else:
-            # 3DGS: 3D representation
-            bd = 2
+            # 3DGS: full 3D representation
             self.means = nn.Parameter(
                 bd * (torch.rand(self.num_gaussians, 3) - 0.5),
                 requires_grad=True

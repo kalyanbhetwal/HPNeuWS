@@ -151,22 +151,14 @@ if __name__ == "__main__":
                     opacities = torch.sigmoid(net.g_im.opacities).detach().cpu().numpy()
                     colors = torch.sigmoid(net.g_im.rgbs).detach().cpu().numpy().squeeze()
 
-                    if args.gs_model_type == "2dgs":
-                        # 2DGS: means are already in pixel space
-                        ax[1, 2].scatter(means[:, 0], means[:, 1], c=colors, s=opacities*50, alpha=0.6, cmap='gray', vmin=0, vmax=1)
-                        ax[1, 2].set_xlim(0, args.width)
-                        ax[1, 2].set_ylim(0, args.width)
-                        ax[1, 2].invert_yaxis()
-                    else:
-                        # 3DGS: means are in 3D space
-                        ax[1, 2].scatter(means[:, 0], means[:, 1], c=colors, s=opacities*50, alpha=0.6, cmap='gray', vmin=0, vmax=1)
-                        ax[1, 2].set_xlim(-2, 2)
-                        ax[1, 2].set_ylim(-2, 2)
-
+                    # Both 2DGS and 3DGS have 3D means, visualize XY projection
+                    ax[1, 2].scatter(means[:, 0], means[:, 1], c=colors, s=opacities*50, alpha=0.6, cmap='gray', vmin=0, vmax=1)
+                    ax[1, 2].set_xlim(-2, 2)
+                    ax[1, 2].set_ylim(-2, 2)
                     ax[1, 2].set_aspect('equal')
                     ax[1, 2].title.set_text(f'Gaussian Positions ({args.gs_model_type.upper()}, N={net.g_im.num_gaussians})')
-                    ax[1, 2].set_xlabel('X (pixels)' if args.gs_model_type == "2dgs" else 'X')
-                    ax[1, 2].set_ylabel('Y (pixels)' if args.gs_model_type == "2dgs" else 'Y')
+                    ax[1, 2].set_xlabel('X')
+                    ax[1, 2].set_ylabel('Y')
                     ax[1, 2].grid(True, alpha=0.3)
                 else:
                     ax[1, 2].axis('off')
