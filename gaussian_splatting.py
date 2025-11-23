@@ -80,11 +80,16 @@ class GaussianSplatting2D(nn.Module):
                 requires_grad=True
             )
 
-            # Rotation angles (in radians) for 2DGS
-            self.quats = nn.Parameter(
-                torch.rand(self.num_gaussians) * 2 * math.pi,
-                requires_grad=True
-            )
+            # Quaternions for 2D rotation (rotation around z-axis)
+            # For 2D rotation by angle θ: q = [cos(θ/2), 0, 0, sin(θ/2)]
+            angles = torch.rand(self.num_gaussians) * 2 * math.pi
+            quats_init = torch.stack([
+                torch.cos(angles / 2),
+                torch.zeros_like(angles),
+                torch.zeros_like(angles),
+                torch.sin(angles / 2),
+            ], dim=1)
+            self.quats = nn.Parameter(quats_init, requires_grad=True)
         else:
             # 3DGS: full 3D representation
             self.means = nn.Parameter(
@@ -149,35 +154,21 @@ class GaussianSplatting2D(nn.Module):
 
     def forward(self):
         """Render Gaussians to an image."""
-        if self.model_type == "2dgs":
-            # 2DGS rendering
-            renders = self.raster_fn(
-                self.means,
-                self.quats,  # rotation angles, not quaternions
-                self.scales,
-                torch.sigmoid(self.opacities),
-                torch.sigmoid(self.rgbs),
-                self.viewmat[None],
-                self.K[None],
-                self.width,
-                self.height,
-                packed=False,
-            )[0]
-        else:
-            # 3DGS rendering
-            q_norm = self.quats / (self.quats.norm(dim=-1, keepdim=True) + 1e-8)
-            renders = self.raster_fn(
-                self.means,
-                q_norm,
-                self.scales,
-                torch.sigmoid(self.opacities),
-                torch.sigmoid(self.rgbs),
-                self.viewmat[None],
-                self.K[None],
-                self.width,
-                self.height,
-                packed=False,
-            )[0]
+        # Normalize quaternions (required for both 2DGS and 3DGS)
+        q_norm = self.quats / (self.quats.norm(dim=-1, keepdim=True) + 1e-8)
+
+        renders = self.raster_fn(
+            self.means,
+            q_norm,
+            self.scales,
+            torch.sigmoid(self.opacities),
+            torch.sigmoid(self.rgbs),
+            self.viewmat[None],
+            self.K[None],
+            self.width,
+            self.height,
+            packed=False,
+        )[0]
 
         # renders is [1, H, W, C], convert to [1, C, H, W]
         output = renders[0].permute(2, 0, 1).unsqueeze(0)
