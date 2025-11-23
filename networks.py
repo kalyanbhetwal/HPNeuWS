@@ -281,13 +281,13 @@ class TemporalZernNet(nn.Module):
 
 
 class StaticDiffuseNet(TemporalZernNet):
-    def __init__(self, width, PSF_size, phs_layers = 2, use_FFT=True, bsize=8, use_pe=False, static_phase=True, use_gsplat=False, num_gaussians=1000, gs_model_type="2dgs"):
+    def __init__(self, width, PSF_size, phs_layers = 2, use_FFT=True, bsize=8, use_pe=False, static_phase=True, use_gsplat=False, num_gaussians=1000, gs_model_type="2dgs", gs_init_scale=0.05):
         super().__init__(width, PSF_size, phs_layers = phs_layers, use_FFT=use_FFT, bsize=bsize, use_pe=use_pe)
 
         # Replace image network with Gaussian Splatting if requested
         if use_gsplat:
-            self.g_im = GaussianSplatting2D(width=width, height=width, num_gaussians=num_gaussians, model_type=gs_model_type, grayscale=True)
-            print(f'Using {gs_model_type.upper()} Gaussian Splatting with {num_gaussians} Gaussians')
+            self.g_im = GaussianSplatting2D(width=width, height=width, num_gaussians=num_gaussians, model_type=gs_model_type, grayscale=True, init_scale=gs_init_scale)
+            print(f'Using {gs_model_type.upper()} Gaussian Splatting with {num_gaussians} Gaussians (init_scale={gs_init_scale})')
 
         hidden_dim = 32
         t_dim = 1 if not static_phase else 0

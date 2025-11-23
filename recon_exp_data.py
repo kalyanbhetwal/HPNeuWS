@@ -29,7 +29,7 @@ if __name__ == "__main__":
     parser.add_argument('--scene_name', default='0609', type=str)
     parser.add_argument('--num_epochs', default=1000, type=int)
     parser.add_argument('--num_t', default=100, type=int)
-    parser.add_argument('--batch_size', default=8, type=int)
+    parser.add_argument('--batch_size', default=12, type=int)
     parser.add_argument('--width', default=256, type=int)
     parser.add_argument('--vis_freq', default=1000, type=int)
     parser.add_argument('--init_lr', default=1e-3, type=float)
@@ -46,6 +46,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_gsplat', action='store_true', help='Use 2D Gaussian Splatting for image network')
     parser.add_argument('--num_gaussians', default=1000, type=int, help='Number of Gaussians for splatting')
     parser.add_argument('--gs_model_type', default='2dgs', type=str, choices=['2dgs', '3dgs'], help='Gaussian splatting model type')
+    parser.add_argument('--gs_init_scale', default=0.05, type=float, help='Initial scale for Gaussians (smaller = sharper)')
 
     args = parser.parse_args()
     PSF_size = args.width
@@ -71,7 +72,7 @@ if __name__ == "__main__":
     if args.dynamic_scene:
         net = MovingDiffuse(width=args.width, PSF_size=PSF_size, use_FFT=True, bsize=args.batch_size, phs_layers=args.phs_layers, static_phase=args.static_phase)
     else:
-        net = StaticDiffuseNet(width=args.width, PSF_size=PSF_size, use_FFT=True, bsize=args.batch_size, phs_layers=args.phs_layers, static_phase=args.static_phase, use_gsplat=args.use_gsplat, num_gaussians=args.num_gaussians, gs_model_type=args.gs_model_type)
+        net = StaticDiffuseNet(width=args.width, PSF_size=PSF_size, use_FFT=True, bsize=args.batch_size, phs_layers=args.phs_layers, static_phase=args.static_phase, use_gsplat=args.use_gsplat, num_gaussians=args.num_gaussians, gs_model_type=args.gs_model_type, gs_init_scale=args.gs_init_scale)
 
     net = net.to(DEVICE)
 

@@ -18,6 +18,7 @@ class GaussianSplatting2D(nn.Module):
         num_gaussians: int = 1000,
         model_type: str = "2dgs",
         grayscale: bool = True,
+        init_scale: float = 0.05,
     ):
         """
         Args:
@@ -26,6 +27,7 @@ class GaussianSplatting2D(nn.Module):
             num_gaussians: Number of Gaussians
             model_type: "3dgs" or "2dgs"
             grayscale: If True, output 1 channel; otherwise 3 channels (RGB)
+            init_scale: Initial scale for Gaussians (smaller = sharper, default 0.05)
         """
         super().__init__()
         if height is None:
@@ -36,6 +38,7 @@ class GaussianSplatting2D(nn.Module):
         self.num_gaussians = num_gaussians
         self.model_type = model_type
         self.grayscale = grayscale
+        self.init_scale = init_scale
 
         if model_type == "3dgs":
             self.raster_fn = rasterization
@@ -73,8 +76,9 @@ class GaussianSplatting2D(nn.Module):
             )
 
             # 2D scales (width, height) + small z scale
-            scales_xy = torch.rand(self.num_gaussians, 2) * 0.5 + 0.1
-            scales_z = torch.ones(self.num_gaussians, 1) * 0.01
+            # Smaller scales for sharper details
+            scales_xy = torch.rand(self.num_gaussians, 2) * self.init_scale + 0.02
+            scales_z = torch.ones(self.num_gaussians, 1) * 0.001
             self.scales = nn.Parameter(
                 torch.cat([scales_xy, scales_z], dim=1),
                 requires_grad=True
@@ -118,15 +122,16 @@ class GaussianSplatting2D(nn.Module):
             self.quats = nn.Parameter(quats_init, requires_grad=True)
 
         # Initialize RGBs in logit space to avoid white-washing
-        initial_brightness = 0.1 if self.grayscale else 0.2
+        initial_brightness = 0.05 if self.grayscale else 0.1
         self.rgbs = nn.Parameter(
-            torch.logit(torch.rand(self.num_gaussians, num_channels) * 0.3 + initial_brightness),
+            torch.logit(torch.rand(self.num_gaussians, num_channels) * 0.4 + initial_brightness),
             requires_grad=True
         )
 
-        # Initialize opacities in logit space for better training
+        # Initialize opacities higher for sharper reconstruction
+        # Higher opacity with small Gaussians = sharper edges
         self.opacities = nn.Parameter(
-            torch.logit(torch.rand(self.num_gaussians) * 0.5 + 0.1),
+            torch.logit(torch.rand(self.num_gaussians) * 0.4 + 0.3),  # 0.3-0.7
             requires_grad=True
         )
 
