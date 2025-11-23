@@ -195,7 +195,7 @@ if __name__ == "__main__":
 
     t1 = time.time()
     print(f'Training takes {t1 - t0} seconds.')
-
+    os.makedirs(f'{vis_dir}/final/per_frame', exist_ok=True) 
     ############
     # Export final results
     out_errs = []
