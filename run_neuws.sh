@@ -29,8 +29,8 @@ python recon_exp_data.py \
     --root_dir /fs/nexus-scratch/bhetwal/NeuWS_data/static_objects_static_aberrations/dog_esophagus_0.5diffuser/Zernike_SLM_data  \
     --scene_name dog_esophagus_gaussian \
     --phs_layers 4 \
-    --num_epochs 1000 \
-    --num_gaussians 20000 \
+    --num_epochs 4000 \
+    --num_gaussians 30000 \
     --vis_freq 500 \
     --gs_model_type 2dgs \
    # --gauss_lr 1e-4 \
