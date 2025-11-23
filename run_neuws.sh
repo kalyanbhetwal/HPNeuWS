@@ -22,7 +22,7 @@ source /fs/nexus-scratch/bhetwal/gsplat_env/bin/activate  # <-- adjust path to y
 # module load python/3.10
 
 # Run Python script
-python recon_exp_data_gs.py \
+python recon_exp_data.py \
     --static_phase \
     --use_gsplat \
     --num_t 100 \
@@ -32,7 +32,8 @@ python recon_exp_data_gs.py \
     --num_epochs 1000 \
     --num_gaussians 20000 \
     --vis_freq 10 \
-    --gauss_lr 1e-4 \
+    --gs_model_type 2dgs \
+   # --gauss_lr 1e-4 \
 # Deactivate environment
 deactivate
 

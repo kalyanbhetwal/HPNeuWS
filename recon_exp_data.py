@@ -52,7 +52,7 @@ if __name__ == "__main__":
 
     ############
     # Setup output folders
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y_%m_%d_%H:%M:%S")
     data_dir = f'{args.root_dir}/{args.data_dir}'
     vis_dir = f'{args.viz_dir}/vis/{args.scene_name}_{timestamp}'
     os.makedirs(f'{args.viz_dir}/vis', exist_ok=True)
