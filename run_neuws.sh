@@ -31,7 +31,7 @@ python recon_exp_data.py \
     --phs_layers 4 \
     --num_epochs 1000 \
     --num_gaussians 20000 \
-    --vis_freq 10 \
+    --vis_freq 500 \
     --gs_model_type 2dgs \
    # --gauss_lr 1e-4 \
 # Deactivate environment
