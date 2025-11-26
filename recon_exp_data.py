@@ -81,7 +81,13 @@ if __name__ == "__main__":
         net = StaticDiffuseNet(width=args.width, PSF_size=PSF_size, use_FFT=True, bsize=args.batch_size, phs_layers=args.phs_layers, static_phase=args.static_phase, use_gsplat=args.use_gsplat, num_gaussians=args.num_gaussians, gs_model_type=args.gs_model_type, gs_init_scale=args.gs_init_scale)
 
     net = net.to(DEVICE)
-    net = torch.compile(net)
+
+    # torch.compile incompatible with gsplat custom CUDA kernels
+    if not args.use_gsplat:
+        net = torch.compile(net)
+        print("Using torch.compile for speedup")
+    else:
+        print("Skipping torch.compile (incompatible with gsplat)")
 
     # Separate learning rates for image and phase networks
     im_lr = args.im_lr if args.im_lr is not None else args.init_lr
