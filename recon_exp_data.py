@@ -10,7 +10,7 @@ from datetime import datetime
 import torch
 print(f"Using PyTorch Version: {torch.__version__}")
 torch.manual_seed(0)
-torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.benchmark = True #was false set to true
 torch.cuda.empty_cache()
 
 import torch.nn.functional as F
@@ -47,6 +47,12 @@ if __name__ == "__main__":
     parser.add_argument('--num_gaussians', default=1000, type=int, help='Number of Gaussians for splatting')
     parser.add_argument('--gs_model_type', default='2dgs', type=str, choices=['2dgs', '3dgs'], help='Gaussian splatting model type')
     parser.add_argument('--gs_init_scale', default=0.05, type=float, help='Initial scale for Gaussians (smaller = sharper)')
+    parser.add_argument('--gs_opacity_reg', default=0.01, type=float, help='L1 regularization on opacity (prevent overfitting)')
+    parser.add_argument('--gs_scale_reg', default=0.01, type=float, help='Scale regularization (keep Gaussians small)')
+    parser.add_argument('--im_lr', default=None, type=float, help='Learning rate for image network (defaults to init_lr)')
+    parser.add_argument('--ph_lr', default=None, type=float, help='Learning rate for phase network (defaults to init_lr)')
+    parser.add_argument('--grad_clip', default=1.0, type=float, help='Gradient clipping value (0 = no clipping)')
+    parser.add_argument('--warmup_epochs', default=10, type=int, help='Number of warmup epochs with lower LR')
 
     args = parser.parse_args()
     PSF_size = args.width
@@ -75,11 +81,18 @@ if __name__ == "__main__":
         net = StaticDiffuseNet(width=args.width, PSF_size=PSF_size, use_FFT=True, bsize=args.batch_size, phs_layers=args.phs_layers, static_phase=args.static_phase, use_gsplat=args.use_gsplat, num_gaussians=args.num_gaussians, gs_model_type=args.gs_model_type, gs_init_scale=args.gs_init_scale)
 
     net = net.to(DEVICE)
+    net = torch.compile(net)
 
-    im_opt = torch.optim.Adam(net.g_im.parameters(), lr=args.init_lr)
-    ph_opt = torch.optim.Adam(net.g_g.parameters(), lr=args.init_lr)
+    # Separate learning rates for image and phase networks
+    im_lr = args.im_lr if args.im_lr is not None else args.init_lr
+    ph_lr = args.ph_lr if args.ph_lr is not None else args.init_lr
+
+    im_opt = torch.optim.Adam(net.g_im.parameters(), lr=im_lr)
+    ph_opt = torch.optim.Adam(net.g_g.parameters(), lr=ph_lr)
     im_sche = torch.optim.lr_scheduler.CosineAnnealingLR(im_opt, T_max = args.num_epochs, eta_min=args.final_lr)
     ph_sche = torch.optim.lr_scheduler.CosineAnnealingLR(ph_opt, T_max = args.num_epochs, eta_min=args.final_lr)
+
+    print(f'Image LR: {im_lr}, Phase LR: {ph_lr}')
 
     total_it = 0
     mse_history = []
@@ -89,6 +102,14 @@ if __name__ == "__main__":
     # Training loop
     t0 = time.time()
     for epoch in t:
+        # Warmup: gradually increase learning rate in early epochs
+        if epoch < args.warmup_epochs:
+            warmup_factor = (epoch + 1) / args.warmup_epochs
+            for param_group in im_opt.param_groups:
+                param_group['lr'] = im_lr * warmup_factor
+            for param_group in ph_opt.param_groups:
+                param_group['lr'] = ph_lr * warmup_factor
+
         idxs = torch.randperm(len(dset)).long().to(DEVICE)
         for it in range(0, len(dset), args.batch_size):
             idx = idxs[it:it+args.batch_size]
@@ -100,14 +121,33 @@ if __name__ == "__main__":
 
             mse_loss = F.mse_loss(y, y_batch)
 
-            loss = mse_loss
+            # Regularization for Gaussian Splatting
+            reg_loss = 0.0
+            if args.use_gsplat:
+                # L1 sparsity on opacities (encourage fewer active Gaussians)
+                opacity_reg = args.gs_opacity_reg * torch.mean(torch.sigmoid(net.g_im.opacities))
+
+                # Scale regularization (keep Gaussians small to prevent blur)
+                scale_reg = args.gs_scale_reg * torch.mean(net.g_im.scales)
+
+                reg_loss = opacity_reg + scale_reg
+
+            loss = mse_loss + reg_loss
             loss.backward()
+
+            # Gradient clipping to prevent instability
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(net.g_im.parameters(), args.grad_clip)
+                torch.nn.utils.clip_grad_norm_(net.g_g.parameters(), args.grad_clip)
 
             ph_opt.step()
             im_opt.step()
 
             mse_history.append(mse_loss.item())
-            t.set_postfix(MSE=f'{mse_loss.item():.4e}')
+            if args.use_gsplat:
+                t.set_postfix(MSE=f'{mse_loss.item():.4e}', Reg=f'{reg_loss.item():.4e}')
+            else:
+                t.set_postfix(MSE=f'{mse_loss.item():.4e}')
 
             if args.vis_freq > 0 and (total_it % args.vis_freq) == 0:
                 y, _kernel, sim_g, sim_phs, I_est = net(x_batch, torch.zeros_like(cur_t) - 0.5)
@@ -183,8 +223,10 @@ if __name__ == "__main__":
 
             total_it += 1
 
-        im_sche.step()
-        ph_sche.step()
+        # Only step schedulers after warmup
+        if epoch >= args.warmup_epochs:
+            im_sche.step()
+            ph_sche.step()
 
     t1 = time.time()
     print(f'Training takes {t1 - t0} seconds.')

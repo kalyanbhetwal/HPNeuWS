@@ -15,7 +15,7 @@ class GaussianSplatting2D(nn.Module):
         self,
         width: int,
         height: int = None,
-        num_gaussians: int = 1000,
+        num_gaussians: int = 10000,
         model_type: str = "2dgs",
         grayscale: bool = True,
         init_scale: float = 0.05,
@@ -121,17 +121,18 @@ class GaussianSplatting2D(nn.Module):
             )
             self.quats = nn.Parameter(quats_init, requires_grad=True)
 
-        # Initialize RGBs in logit space to avoid white-washing
-        initial_brightness = 0.05 if self.grayscale else 0.1
+        # Initialize RGBs in logit space - VERY DARK to prevent initial overexposure
+        # With many overlapping Gaussians, even small values sum to white
+        initial_brightness = 0.001 if self.grayscale else 0.01
         self.rgbs = nn.Parameter(
-            torch.logit(torch.rand(self.num_gaussians, num_channels) * 0.4 + initial_brightness),
+            torch.logit(torch.rand(self.num_gaussians, num_channels) * 0.02 + initial_brightness),
             requires_grad=True
         )
 
-        # Initialize opacities higher for sharper reconstruction
-        # Higher opacity with small Gaussians = sharper edges
+        # Initialize opacities LOW to prevent initial overexposure
+        # Will increase during training via gradient descent
         self.opacities = nn.Parameter(
-            torch.logit(torch.rand(self.num_gaussians) * 0.4 + 0.3),  # 0.3-0.7
+            torch.logit(torch.rand(self.num_gaussians) * 0.1 + 0.05),  # 0.05-0.15
             requires_grad=True
         )
 
