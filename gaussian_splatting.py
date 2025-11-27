@@ -19,6 +19,8 @@ class GaussianSplatting2D(nn.Module):
         model_type: str = "2dgs",
         grayscale: bool = True,
         init_scale: float = 0.05,
+        init_radius: float = 1.0,
+        uniform_init: bool = False
     ):
         """
         Args:
@@ -28,6 +30,7 @@ class GaussianSplatting2D(nn.Module):
             model_type: "3dgs" or "2dgs"
             grayscale: If True, output 1 channel; otherwise 3 channels (RGB)
             init_scale: Initial scale for Gaussians (smaller = sharper, default 0.05)
+            uniform_init: If True, uniformly distribute Gaussians across entire image; otherwise circular
         """
         super().__init__()
         if height is None:
@@ -39,44 +42,60 @@ class GaussianSplatting2D(nn.Module):
         self.model_type = model_type
         self.grayscale = grayscale
         self.init_scale = init_scale
+        self.uniform_init = uniform_init
 
         if model_type == "3dgs":
             self.raster_fn = rasterization
         else:
             self.raster_fn = rasterization_2dgs
 
+        self.init_radius = init_radius
         self._init_gaussians()
 
+        # Create circular mask for loss computation
+        self._create_circular_mask()
+    
     def _init_gaussians(self):
         """Initialize Gaussian parameters as nn.Parameter."""
         num_channels = 1 if self.grayscale else 3
-        bd = 2
+        
+        # This is the maximum radius of our circle
+        init_radius = self.init_radius 
 
         if self.model_type == "2dgs":
-            # 2DGS: 2D Gaussians embedded in 3D space (z=0)
-            # Initialize with grid + noise for uniform coverage (like aberration basis)
-            grid_size = int(math.sqrt(self.num_gaussians))
-            if grid_size * grid_size < self.num_gaussians:
-                grid_size += 1
 
-            # Create grid in [-bd, bd] to match camera view
-            x = torch.linspace(-bd, bd, grid_size)
-            y = torch.linspace(-bd, bd, grid_size)
-            grid_x, grid_y = torch.meshgrid(x, y, indexing='xy')
-            grid_xy = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=1)[:self.num_gaussians]
+            if self.uniform_init:
+                print(f"Using uniform rectangular initialization...")
+                # Uniform distribution across entire image [-2, 2] x [-2, 2]
+                means_x = torch.rand(self.num_gaussians) * 4 - 2  # [-2, 2]
+                means_y = torch.rand(self.num_gaussians) * 4 - 2  # [-2, 2]
+                means_xy = torch.stack([means_x, means_y], dim=1)
+            else:
+                print(f"Using circular initialization with radius {init_radius}...")
 
-            # Add small random noise for variation
-            noise = (torch.rand_like(grid_xy) - 0.5) * (2 * bd / grid_size) * 0.5
-            means_xy = grid_xy + noise
+                # 1. Generate random angles from 0 to 2*pi
+                angles = torch.rand(self.num_gaussians) * 2 * math.pi
+
+                # 2. Generate random radii
+                # We use sqrt(rand) to ensure a uniform *area* distribution,
+                # otherwise points would bunch up at the center.
+                radii = init_radius * torch.sqrt(torch.rand(self.num_gaussians))
+
+                # 3. Convert from polar (r, theta) to cartesian (x, y)
+                means_x = radii * torch.cos(angles)
+                means_y = radii * torch.sin(angles)
+
+                # Shape [num_gaussians, 2]
+                means_xy = torch.stack([means_x, means_y], dim=1)
+
+
             means_z = torch.zeros(self.num_gaussians, 1)
-
             self.means = nn.Parameter(
                 torch.cat([means_xy, means_z], dim=1),
                 requires_grad=True
             )
 
             # 2D scales (width, height) + small z scale
-            # Smaller scales for sharper details
             scales_xy = torch.rand(self.num_gaussians, 2) * self.init_scale + 0.02
             scales_z = torch.ones(self.num_gaussians, 1) * 0.001
             self.scales = nn.Parameter(
@@ -85,13 +104,12 @@ class GaussianSplatting2D(nn.Module):
             )
 
             # Quaternions for 2D rotation (rotation around z-axis)
-            # For 2D rotation by angle θ: q = [cos(θ/2), 0, 0, sin(θ/2)]
-            angles = torch.rand(self.num_gaussians) * 2 * math.pi
+            angles_quat = torch.rand(self.num_gaussians) * 2 * math.pi
             quats_init = torch.stack([
-                torch.cos(angles / 2),
-                torch.zeros_like(angles),
-                torch.zeros_like(angles),
-                torch.sin(angles / 2),
+                torch.cos(angles_quat / 2),
+                torch.zeros_like(angles_quat),
+                torch.zeros_like(angles_quat),
+                torch.sin(angles_quat / 2),
             ], dim=1)
             self.quats = nn.Parameter(quats_init, requires_grad=True)
         else:
@@ -121,18 +139,17 @@ class GaussianSplatting2D(nn.Module):
             )
             self.quats = nn.Parameter(quats_init, requires_grad=True)
 
-        # Initialize RGBs in logit space - VERY DARK to prevent initial overexposure
-        # With many overlapping Gaussians, even small values sum to white
-        initial_brightness = 0.001 if self.grayscale else 0.01
+        # Initialize RGBs in logit space to avoid white-washing
+        initial_brightness = 0.05 if self.grayscale else 0.1
         self.rgbs = nn.Parameter(
-            torch.logit(torch.rand(self.num_gaussians, num_channels) * 0.02 + initial_brightness),
+            torch.logit(torch.rand(self.num_gaussians, num_channels) * 0.4 + initial_brightness),
             requires_grad=True
         )
 
-        # Initialize opacities LOW to prevent initial overexposure
-        # Will increase during training via gradient descent
+        # Initialize opacities higher for sharper reconstruction
+        # Higher opacity with small Gaussians = sharper edges
         self.opacities = nn.Parameter(
-            torch.logit(torch.rand(self.num_gaussians) * 0.1 + 0.05),  # 0.05-0.15
+            torch.logit(torch.rand(self.num_gaussians) * 0.4 + 0.3),  # 0.3-0.7
             requires_grad=True
         )
 
@@ -157,6 +174,26 @@ class GaussianSplatting2D(nn.Module):
             ],
         )
         self.register_buffer("K", K)
+
+    def _create_circular_mask(self):
+        """Create a circular mask for loss computation based on init_radius."""
+        # Create coordinate grid in normalized space [-2, 2]
+        y_coords = torch.linspace(-2, 2, self.height)
+        x_coords = torch.linspace(-2, 2, self.width)
+        yy, xx = torch.meshgrid(y_coords, x_coords, indexing='ij')
+
+        # Distance from center
+        dist = torch.sqrt(xx**2 + yy**2)
+
+        # Binary mask: 1 inside circle, 0 outside
+        mask = (dist <= self.init_radius).float()
+
+        # Register as buffer (non-trainable, moves with model)
+        self.register_buffer("loss_mask", mask)
+
+    def get_loss_mask(self):
+        """Return the circular mask for loss computation."""
+        return self.loss_mask
 
     def forward(self):
         """Render Gaussians to an image."""

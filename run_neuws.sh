@@ -25,14 +25,23 @@ source /fs/nexus-scratch/bhetwal/gsplat_env/bin/activate  # <-- adjust path to y
 python recon_exp_data.py \
     --static_phase \
     --use_gsplat \
+    --densify \
+    --densify_interval 500 \
+    --densify_from_iter 500 \
+    --densify_until_iter 4000 \
+    --densify_grad_percentile 80 \
+    --densify_radius 1.4 \
+    --max_gaussians 50000 \
     --num_t 100 \
     --root_dir /fs/nexus-scratch/bhetwal/NeuWS_data/static_objects_static_aberrations/dog_esophagus_0.5diffuser/Zernike_SLM_data  \
     --scene_name dog_esophagus_gaussian \
     --phs_layers 4 \
-    --num_epochs 4000 \
-    --num_gaussians 30000 \
+    --num_epochs 1500 \
+    --num_gaussians 3000 \
     --vis_freq 500 \
     --gs_model_type 2dgs \
+    --use_circular_mask \
+    --im_lr 5e-3 \
    # --gauss_lr 1e-4 \
 # Deactivate environment
 deactivate

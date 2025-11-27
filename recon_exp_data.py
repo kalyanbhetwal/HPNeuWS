@@ -47,12 +47,24 @@ if __name__ == "__main__":
     parser.add_argument('--num_gaussians', default=1000, type=int, help='Number of Gaussians for splatting')
     parser.add_argument('--gs_model_type', default='2dgs', type=str, choices=['2dgs', '3dgs'], help='Gaussian splatting model type')
     parser.add_argument('--gs_init_scale', default=0.05, type=float, help='Initial scale for Gaussians (smaller = sharper)')
+    parser.add_argument('--gs_init_radius', default=1.3, type=float, help='Initial radius for circular Gaussian distribution (matches scene extent)')
+    parser.add_argument('--uniform_init', action='store_true', help='Initialize Gaussians uniformly across entire image (instead of circular)')
     parser.add_argument('--gs_opacity_reg', default=0.01, type=float, help='L1 regularization on opacity (prevent overfitting)')
     parser.add_argument('--gs_scale_reg', default=0.01, type=float, help='Scale regularization (keep Gaussians small)')
     parser.add_argument('--im_lr', default=None, type=float, help='Learning rate for image network (defaults to init_lr)')
     parser.add_argument('--ph_lr', default=None, type=float, help='Learning rate for phase network (defaults to init_lr)')
     parser.add_argument('--grad_clip', default=1.0, type=float, help='Gradient clipping value (0 = no clipping)')
     parser.add_argument('--warmup_epochs', default=10, type=int, help='Number of warmup epochs with lower LR')
+    parser.add_argument('--use_circular_mask', action='store_true', help='Only compute loss in circular region where Gaussians are initialized')
+    parser.add_argument('--constrain_gaussians', action='store_true', help='Constrain Gaussian positions to stay inside circular mask')
+    parser.add_argument('--position_penalty', default=0.1, type=float, help='Weight for soft position penalty (encourages Gaussians to stay inside circle)')
+    parser.add_argument('--densify', action='store_true', help='Densify Gaussians in high-gradient regions (split Gaussians with high gradients)')
+    parser.add_argument('--densify_interval', default=100, type=int, help='Densify every N iterations')
+    parser.add_argument('--densify_from_iter', default=500, type=int, help='Start densification after N iterations (wait for initial convergence)')
+    parser.add_argument('--densify_until_iter', default=15000, type=int, help='Stop densification after N iterations')
+    parser.add_argument('--densify_grad_percentile', default=90, type=float, help='Densify Gaussians in top N percentile of accumulated gradients')
+    parser.add_argument('--densify_radius', default=None, type=float, help='Only densify Gaussians within this radius from center (None = no restriction)')
+    parser.add_argument('--max_gaussians', default=50000, type=int, help='Maximum number of Gaussians after densification')
 
     args = parser.parse_args()
     PSF_size = args.width
@@ -75,10 +87,24 @@ if __name__ == "__main__":
     x_batches = torch.cat(dset.xs, axis=0).unsqueeze(1).to(DEVICE)
     y_batches = torch.stack(dset.ys, axis=0).to(DEVICE)
 
+    # Compute and save average of all input measurements
+    y_avg = y_batches.mean(dim=0).detach().cpu().numpy()
+    os.makedirs(f'{vis_dir}/analysis', exist_ok=True)
+    plt.figure(figsize=(8, 8))
+    plt.imshow(y_avg, cmap='gray', vmin=0, vmax=1)
+    plt.title(f'Average of {args.num_t} Input Measurements')
+    plt.colorbar()
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(f'{vis_dir}/analysis/input_average.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    imageio.imsave(f'{vis_dir}/analysis/input_average_raw.png', np.uint8(y_avg * 255))
+    print(f'Saved average input image to {vis_dir}/analysis/input_average.png')
+
     if args.dynamic_scene:
         net = MovingDiffuse(width=args.width, PSF_size=PSF_size, use_FFT=True, bsize=args.batch_size, phs_layers=args.phs_layers, static_phase=args.static_phase)
     else:
-        net = StaticDiffuseNet(width=args.width, PSF_size=PSF_size, use_FFT=True, bsize=args.batch_size, phs_layers=args.phs_layers, static_phase=args.static_phase, use_gsplat=args.use_gsplat, num_gaussians=args.num_gaussians, gs_model_type=args.gs_model_type, gs_init_scale=args.gs_init_scale)
+        net = StaticDiffuseNet(width=args.width, PSF_size=PSF_size, use_FFT=True, bsize=args.batch_size, phs_layers=args.phs_layers, static_phase=args.static_phase, use_gsplat=args.use_gsplat, num_gaussians=args.num_gaussians, gs_model_type=args.gs_model_type, gs_init_scale=args.gs_init_scale, init_radius=args.gs_init_radius, uniform_init=args.uniform_init)
 
     net = net.to(DEVICE)
 
@@ -88,6 +114,18 @@ if __name__ == "__main__":
         print("Using torch.compile for speedup")
     else:
         print("Skipping torch.compile (incompatible with gsplat)")
+
+    # Save circular mask visualization if using masked loss
+    if args.use_gsplat and args.use_circular_mask:
+        mask = net.g_im.get_loss_mask().cpu().numpy()
+        plt.figure(figsize=(8, 8))
+        plt.imshow(mask, cmap='gray')
+        plt.title(f'Loss Mask (radius={args.gs_init_radius}, area={mask.sum():.0f}/{mask.size} = {100*mask.mean():.1f}%)')
+        plt.colorbar()
+        plt.tight_layout()
+        plt.savefig(f'{vis_dir}/analysis/loss_mask.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f'Using circular loss mask with radius={args.gs_init_radius}')
 
     # Separate learning rates for image and phase networks
     im_lr = args.im_lr if args.im_lr is not None else args.init_lr
@@ -102,6 +140,7 @@ if __name__ == "__main__":
 
     total_it = 0
     mse_history = []
+
     t = tqdm.trange(args.num_epochs, disable=args.silence_tqdm)
 
     ############
@@ -125,33 +164,71 @@ if __name__ == "__main__":
 
             y, _kernel, sim_g, sim_phs, I_est = net(x_batch, cur_t)
 
-            mse_loss = F.mse_loss(y, y_batch)
+            # Apply circular mask in loss computation if enabled
+            if args.use_gsplat and args.use_circular_mask:
+                mask = net.g_im.get_loss_mask()
+                # Expand mask to match batch dimensions
+                mask_expanded = mask.unsqueeze(0).expand(y.shape[0], -1, -1)
+                # Masked MSE loss
+                mse_loss = F.mse_loss(y * mask_expanded, y_batch * mask_expanded)
+                # Normalize by mask area to get correct scale
+                mask_area = mask.sum()
+                total_area = mask.numel()
+                mse_loss = mse_loss * (total_area / mask_area)
+            else:
+                mse_loss = F.mse_loss(y, y_batch)
 
             # Regularization for Gaussian Splatting
             reg_loss = 0.0
-            if args.use_gsplat:
-                # L1 sparsity on opacities (encourage fewer active Gaussians)
-                opacity_reg = args.gs_opacity_reg * torch.mean(torch.sigmoid(net.g_im.opacities))
+            # if args.use_gsplat:
+            #     # L1 sparsity on opacities (encourage fewer active Gaussians)
+            #     opacity_reg = args.gs_opacity_reg * torch.mean(torch.sigmoid(net.g_im.opacities))
 
-                # Scale regularization (keep Gaussians small to prevent blur)
-                scale_reg = args.gs_scale_reg * torch.mean(net.g_im.scales)
+            #     # Scale regularization (keep Gaussians small to prevent blur)
+            #     scale_reg = args.gs_scale_reg * torch.mean(net.g_im.scales)
 
-                reg_loss = opacity_reg + scale_reg
+            #     reg_loss = opacity_reg + scale_reg
+
+            # Soft position penalty (encourages Gaussians to stay inside circle)
+            if args.use_gsplat and args.constrain_gaussians:
+                # Get XY positions
+                positions_xy = net.g_im.means[:, :2]  # [N, 2]
+
+                # Compute distance from center
+                dist = torch.sqrt((positions_xy ** 2).sum(dim=1))  # [N]
+
+                # Penalty for Gaussians outside the radius (quadratic penalty)
+                # Only penalize those outside, no penalty inside
+                violations = torch.relu(dist - args.gs_init_radius)  # 0 if inside, positive if outside
+                position_penalty = args.position_penalty * torch.mean(violations ** 2)
+                reg_loss = reg_loss + position_penalty
 
             loss = mse_loss + reg_loss
             loss.backward()
 
+            # Compute gradient magnitude per Gaussian for visualization
+            if args.use_gsplat:
+                with torch.no_grad():
+                    # Gradient magnitude from position gradients
+                    grad_mag = net.g_im.means.grad.norm(dim=1).detach().cpu().numpy()
+
+                    # Store for visualization (will be used in next vis iteration)
+                    if not hasattr(net.g_im, 'grad_magnitudes'):
+                        net.g_im.grad_magnitudes = grad_mag
+                    else:
+                        net.g_im.grad_magnitudes = grad_mag
+
             # Gradient clipping to prevent instability
-            if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(net.g_im.parameters(), args.grad_clip)
-                torch.nn.utils.clip_grad_norm_(net.g_g.parameters(), args.grad_clip)
+            # if args.grad_clip > 0:
+            #     torch.nn.utils.clip_grad_norm_(net.g_im.parameters(), args.grad_clip)
+            #     torch.nn.utils.clip_grad_norm_(net.g_g.parameters(), args.grad_clip)
 
             ph_opt.step()
             im_opt.step()
 
             mse_history.append(mse_loss.item())
             if args.use_gsplat:
-                t.set_postfix(MSE=f'{mse_loss.item():.4e}', Reg=f'{reg_loss.item():.4e}')
+                t.set_postfix(MSE=f'{mse_loss.item():.4e}')#, Reg=f'{reg_loss.item():.4e}')
             else:
                 t.set_postfix(MSE=f'{mse_loss.item():.4e}')
 
@@ -196,17 +273,55 @@ if __name__ == "__main__":
                 if args.use_gsplat:
                     means = net.g_im.means.detach().cpu().numpy()
                     opacities = torch.sigmoid(net.g_im.opacities).detach().cpu().numpy()
-                    colors = torch.sigmoid(net.g_im.rgbs).detach().cpu().numpy().squeeze()
+
+                    # Count active Gaussians (opacity > threshold)
+                    opacity_threshold = 0.1
+                    num_active = (opacities > opacity_threshold).sum()
+                    num_total = net.g_im.num_gaussians
+
+                    # Color by gradient magnitude if available, otherwise by brightness
+                    if hasattr(net.g_im, 'grad_magnitudes'):
+                        grad_mag = net.g_im.grad_magnitudes
+
+                        # Bin into 4 categories based on percentiles
+                        p25 = np.percentile(grad_mag, 25)
+                        p50 = np.percentile(grad_mag, 50)
+                        p75 = np.percentile(grad_mag, 75)
+
+                        # Assign discrete colors: blue (very low), green (low), yellow (medium), red (high)
+                        colors = np.zeros((len(grad_mag), 3))
+                        colors[grad_mag <= p25] = [0.2, 0.4, 0.8]      # Blue: very low gradient
+                        colors[(grad_mag > p25) & (grad_mag <= p50)] = [0.3, 0.8, 0.3]  # Green: low gradient
+                        colors[(grad_mag > p50) & (grad_mag <= p75)] = [0.95, 0.8, 0.2] # Yellow: medium gradient
+                        colors[grad_mag > p75] = [0.9, 0.2, 0.2]       # Red: high gradient
+
+                        # Create legend handles for gradient quartiles
+                        from matplotlib.patches import Patch
+                        legend_elements = [
+                            Patch(facecolor=[0.2, 0.4, 0.8], edgecolor='black', label='0-25%'),
+                            Patch(facecolor=[0.3, 0.8, 0.3], edgecolor='black', label='25-50%'),
+                            Patch(facecolor=[0.95, 0.8, 0.2], edgecolor='black', label='50-75%'),
+                            Patch(facecolor=[0.9, 0.2, 0.2], edgecolor='black', label='75-100%')
+                        ]
+                        use_legend = True
+                        title_text = f'Gaussians ({num_active}/{num_total} active)'
+                    else:
+                        colors = torch.sigmoid(net.g_im.rgbs).detach().cpu().numpy().squeeze()
+                        colors = np.repeat(colors[:, np.newaxis], 3, axis=1)  # Grayscale to RGB
+                        use_legend = False
+                        title_text = f'Gaussians ({num_active}/{num_total} active)'
 
                     # Both 2DGS and 3DGS have 3D means, visualize XY projection
-                    ax[1, 2].scatter(means[:, 0], means[:, 1], c=colors, s=opacities*50, alpha=0.6, cmap='gray', vmin=0, vmax=1)
+                    scatter = ax[1, 2].scatter(means[:, 0], means[:, 1], c=colors, s=opacities*50, alpha=0.7, edgecolors='black', linewidths=0.3)
                     ax[1, 2].set_xlim(-2, 2)
                     ax[1, 2].set_ylim(-2, 2)
                     ax[1, 2].set_aspect('equal')
-                    ax[1, 2].title.set_text(f'Gaussian Positions ({args.gs_model_type.upper()}, N={net.g_im.num_gaussians})')
+                    ax[1, 2].set_title(title_text, fontsize=8)
                     ax[1, 2].set_xlabel('X')
                     ax[1, 2].set_ylabel('Y')
                     ax[1, 2].grid(True, alpha=0.3)
+                    if use_legend:
+                        ax[1, 2].legend(handles=legend_elements, loc='upper right', fontsize=6, framealpha=0.9)
                 else:
                     ax[1, 2].axis('off')
                     ax[1, 2].title.set_text('N/A (not using gsplat)')
@@ -236,7 +351,31 @@ if __name__ == "__main__":
 
     t1 = time.time()
     print(f'Training takes {t1 - t0} seconds.')
-    os.makedirs(f'{vis_dir}/final/per_frame', exist_ok=True) 
+    os.makedirs(f'{vis_dir}/final/per_frame', exist_ok=True)
+
+    ############
+    # Export average reconstruction
+    with torch.no_grad():
+        all_reconstructions = []
+        for t_idx in range(args.num_t):
+            cur_t = (t_idx / (args.num_t - 1)) - 0.5
+            cur_t = torch.FloatTensor([cur_t]).to(DEVICE)
+            I_est, _, _ = net.get_estimates(cur_t)
+            I_est = torch.clamp(I_est, 0, 1).squeeze().detach().cpu().numpy()
+            all_reconstructions.append(I_est)
+
+        recon_avg = np.mean(all_reconstructions, axis=0)
+        plt.figure(figsize=(8, 8))
+        plt.imshow(recon_avg, cmap='gray')
+        plt.title(f'Average Reconstruction from {args.num_t} Frames')
+        plt.colorbar()
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(f'{vis_dir}/analysis/reconstruction_average.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        imageio.imsave(f'{vis_dir}/analysis/reconstruction_average_raw.png', np.uint8(recon_avg * 255))
+        print(f'Saved average reconstruction to {vis_dir}/analysis/reconstruction_average.png')
+
     ############
     # Export final results
     out_errs = []
@@ -272,6 +411,66 @@ if __name__ == "__main__":
     else:
         imageio.mimsave(f'{vis_dir}/final/final_aberrations_angle_grey.gif', out_errs, duration=1000*1./30)
         imageio.mimsave(f'{vis_dir}/final/final_aberrations.gif', out_abes, duration=1000*1./30)
+
+    # Save final Gaussian gradient visualization
+    if args.use_gsplat and hasattr(net.g_im, 'grad_magnitudes'):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+        means = net.g_im.means.detach().cpu().numpy()
+        opacities = torch.sigmoid(net.g_im.opacities).detach().cpu().numpy()
+        grad_mag = net.g_im.grad_magnitudes
+
+        # Count active Gaussians
+        opacity_threshold = 0.1
+        num_active = (opacities > opacity_threshold).sum()
+        num_total = net.g_im.num_gaussians
+
+        # Bin into 4 categories based on percentiles
+        p25 = np.percentile(grad_mag, 25)
+        p50 = np.percentile(grad_mag, 50)
+        p75 = np.percentile(grad_mag, 75)
+
+        # Left: colored by gradient magnitude (4 discrete colors)
+        colors = np.zeros((len(grad_mag), 3))
+        colors[grad_mag <= p25] = [0.2, 0.4, 0.8]      # Blue: very low gradient
+        colors[(grad_mag > p25) & (grad_mag <= p50)] = [0.3, 0.8, 0.3]  # Green: low gradient
+        colors[(grad_mag > p50) & (grad_mag <= p75)] = [0.95, 0.8, 0.2] # Yellow: medium gradient
+        colors[grad_mag > p75] = [0.9, 0.2, 0.2]       # Red: high gradient
+
+        sc1 = ax1.scatter(means[:, 0], means[:, 1], c=colors, s=opacities*50, alpha=0.7, edgecolors='black', linewidths=0.5)
+        ax1.set_xlim(-2, 2)
+        ax1.set_ylim(-2, 2)
+        ax1.set_aspect('equal')
+        ax1.set_title(f'Gaussians by gradient ({num_active}/{num_total} active)', fontsize=11)
+        ax1.set_xlabel('X')
+        ax1.set_ylabel('Y')
+        ax1.grid(True, alpha=0.3)
+
+        # Add legend for gradient quartiles
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor=[0.2, 0.4, 0.8], edgecolor='black', label='0-25%'),
+            Patch(facecolor=[0.3, 0.8, 0.3], edgecolor='black', label='25-50%'),
+            Patch(facecolor=[0.95, 0.8, 0.2], edgecolor='black', label='50-75%'),
+            Patch(facecolor=[0.9, 0.2, 0.2], edgecolor='black', label='75-100%')
+        ]
+        ax1.legend(handles=legend_elements, loc='upper right', fontsize=9, framealpha=0.95, title='Gradient percentile')
+
+        # Right: histogram with colored bins
+        ax2.hist(grad_mag, bins=50, alpha=0.7, edgecolor='black', color='gray')
+        ax2.axvline(p25, color=[0.2, 0.4, 0.8], linestyle='--', linewidth=2, label=f'🔵 25%: {p25:.2e}')
+        ax2.axvline(p50, color=[0.3, 0.8, 0.3], linestyle='--', linewidth=2, label=f'🟢 50%: {p50:.2e}')
+        ax2.axvline(p75, color=[0.95, 0.8, 0.2], linestyle='--', linewidth=2, label=f'🟡 75%: {p75:.2e}')
+        ax2.set_xlabel('Gradient magnitude')
+        ax2.set_ylabel('Count')
+        ax2.set_title(f'Gradient distribution\n(min={grad_mag.min():.2e}, max={grad_mag.max():.2e})')
+        ax2.legend(fontsize=9)
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(f'{vis_dir}/final/gaussian_gradients.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved Gaussian gradient visualization to {vis_dir}/final/gaussian_gradients.png")
 
     print("Training concludes.")
 
