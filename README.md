@@ -19,7 +19,26 @@ Please download a NeuWS dataset from https://doi.org/10.5061/dryad.6t1g1jx42. Th
 
 ## Reconstruct Experimental Data
 
-Place the experimental data in the folder `DATA_DIR/SCENE_NAME`. Set the variable `NUM_FRAMES` to the number of frames captured in the dataset. 
+Place the experimental data in the folder `DATA_DIR/SCENE_NAME`. Set the variable `NUM_FRAMES` to the number of frames captured in the dataset.
+
+### Gaussian Splatting for Image Representation
+
+This implementation supports using 2D Gaussian Splatting (via gsplat library) as an alternative image representation. Key features:
+- Circular or uniform initialization of Gaussians
+- Gradient-based visualization showing which Gaussians are actively learning
+- Optional circular masking for loss computation
+- Soft position constraints to keep Gaussians in scene region
+
+Example with Gaussian Splatting:
+```
+python ./recon_exp_data.py \
+    --static_phase --use_gsplat \
+    --num_gaussians 2000 --gs_model_type 2dgs \
+    --gs_init_radius 1.3 --uniform_init \
+    --use_circular_mask --constrain_gaussians \
+    --num_t 100 --data_dir DATA_DIR/SCENE_NAME/Zernike_SLM_data \
+    --scene_name SCENE_NAME --phs_layers 4 --num_epochs 1000
+```
 
 For scenes containing static scene and static aberration (e.g. Fig. 2 in paper), run the following command:
 ``` 

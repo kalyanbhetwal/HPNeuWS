@@ -41,7 +41,7 @@ python recon_exp_data.py \
     --vis_freq 500 \
     --gs_model_type 2dgs \
     --use_circular_mask \
-    --im_lr 5e-3 \
+    --im_lr 5e-2 \
    # --gauss_lr 1e-4 \
 # Deactivate environment
 deactivate
